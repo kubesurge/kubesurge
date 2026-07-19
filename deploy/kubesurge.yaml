@@ -1,0 +1,67 @@
+apiVersion: krew.googlecontainertooling.github.com/v1alpha2
+kind: Plugin
+metadata:
+  name: kubesurge
+spec:
+  version: "v0.1.0" # Managed dynamically during releases
+  homepage: https://github.com/kubesurge/kubesurge
+  shortDescription: Zero-touch, live multi-cloud pod packet capture and exfiltration.
+  description: |
+    KubeSurge injects safe, harvested ephemeral container payloads into running pods 
+    without restarts. It streams tcpdump captures directly to S3, GCS, Azure Blob, 
+    or local disk, bypassing local node write overhead and protecting sensitive workloads.
+  caveats: |
+    Requires Kubernetes 1.25+ and permissions to patch 'pods/ephemeralcontainers'.
+    If targeting hardened nodes, run with the --privileged flag to override UID restrictions.
+  platforms:
+    - selector:
+        matchLabels:
+          os: darwin
+          arch: amd64
+      uri: https://github.com/kubesurge/kubesurge/releases/download/v0.1.0/kubesurge_Darwin_x86_64.tar.gz
+      sha256: "replace-with-checksum-during-build"
+      files:
+        - from: "./kubesurge"
+          to: "."
+        - from: "./LICENSE"
+          to: "."
+      bin: "kubesurge"
+
+    - selector:
+        matchLabels:
+          os: darwin
+          arch: arm64
+      uri: https://github.com/kubesurge/kubesurge/releases/download/v0.1.0/kubesurge_Darwin_arm64.tar.gz
+      sha256: "replace-with-checksum-during-build"
+      files:
+        - from: "./kubesurge"
+          to: "."
+        - from: "./LICENSE"
+          to: "."
+      bin: "kubesurge"
+
+    - selector:
+        matchLabels:
+          os: linux
+          arch: amd64
+      uri: https://github.com/kubesurge/kubesurge/releases/download/v0.1.0/kubesurge_Linux_x86_64.tar.gz
+      sha256: "replace-with-checksum-during-build"
+      files:
+        - from: "./kubesurge"
+          to: "."
+        - from: "./LICENSE"
+          to: "."
+      bin: "kubesurge"
+
+    - selector:
+        matchLabels:
+          os: linux
+          arch: arm64
+      uri: https://github.com/kubesurge/kubesurge/releases/download/v0.1.0/kubesurge_Linux_arm64.tar.gz
+      sha256: "replace-with-checksum-during-build"
+      files:
+        - from: "./kubesurge"
+          to: "."
+        - from: "./LICENSE"
+          to: "."
+      bin: "kubesurge"

@@ -1,0 +1,42 @@
+# ── Binaries & Executables ────────────────────────────────────────────────────
+bin/
+kubesurge
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# ── Testing & Coverage ────────────────────────────────────────────────────────
+*.out
+*.test
+*.prof
+coverage.html
+
+# ── Dependency Directories ──────────────────────────────────────────────────
+# Only ignore vendor if you do not want to commit it. CNCF tools generally do
+# not commit vendor/ unless using vendor caching, preferring go.sum.
+vendor/
+
+# ── IDEs & Editors ────────────────────────────────────────────────────────────
+# VS Code
+.vscode/
+# GoLand / IntelliJ
+.idea/
+*.iml
+# Vim
+*~
+*.swp
+# macOS System Files
+.DS_Store
+
+# ── GoReleaser & Local Builds ─────────────────────────────────────────────────
+dist/
+
+# ── Local Test Output ─────────────────────────────────────────────────────────
+*.pcap
+*.dmp
+*.nettrace
+*.attrs
+tmp/
+scratch/

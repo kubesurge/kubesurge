@@ -1,0 +1,139 @@
+name: CI/CD Release Pipeline
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: write    # Required to upload release assets
+  packages: write    # Required to push to GHCR
+  id-token: write    # Required for Cosign keyless signing OIDC identity
+
+jobs:
+  # ── Stage 1: Test & Lint ────────────────────────────────────────────────────
+  test:
+    name: Test & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Check Formatting
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "The following files are not formatted:"
+            gofmt -l .
+            exit 1
+          fi
+
+      - name: Go Tidy Check
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum || (echo "go.mod/sum are not tidy" && exit 1)
+
+      - name: Run Tests
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+  # ── Stage 2: Build & Sign Container Image ───────────────────────────────────
+  publish-image:
+    name: Publish & Sign Debugpod
+    needs: test
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    env:
+      REGISTRY: ghcr.io
+
+      IMAGE_NAME: kubesurge/debugpod
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.5.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Metadata (Tags, Labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,format=short
+
+      - name: Build and Push Docker Image
+        id: build-and-push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.debugpod
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Cosign Keyless Signing uses OIDC authentication (actions/id-token permission)
+      # to sign container images with the workflow run identity.
+      - name: Sign the Published Image
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build-and-push.outputs.digest }}
+        run: |
+          images=""
+          for tag in ${TAGS//,/ }; do
+            images="$images $tag@$DIGEST"
+          done
+          for img in $images; do
+            echo "Signing image: $img"
+            cosign sign --yes "$img"
+          done
+
+  # ── Stage 3: Build & Publish CLI Binaries ───────────────────────────────────
+  release-binaries:
+    name: Publish CLI Binaries
+    needs: test
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') # Only release binaries on version tags
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

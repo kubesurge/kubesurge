@@ -1,0 +1,32 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubesurge-operator
+rules:
+  # 1. Read access to pods is required to locate targets and verify status
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+  # 2. Access to ephemeralcontainers subresource is required to inject the debug payload
+  - apiGroups: [""]
+    resources: ["pods/ephemeralcontainers"]
+    verbs: ["get", "patch"]
+
+  # 3. Create access to pods/exec subresource is required to stream tcpdump and tools stdout
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubesurge-operator-binding
+subjects:
+  - kind: ServiceAccount
+    name: kubesurge-dev
+    namespace: diagnostics
+roleRef:
+  kind: ClusterRole
+  name: kubesurge-operator
+  apiGroup: rbac.authorization.k8s.io
