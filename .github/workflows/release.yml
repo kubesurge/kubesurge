@@ -3,10 +3,18 @@ name: CI/CD Release Pipeline
 on:
   push:
     branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'deploy/**'
+      - '.krew.yaml'
     tags:
       - 'v*'
   pull_request:
     branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'deploy/**'
+      - '.krew.yaml'
 
 permissions:
   contents: write    # Required to upload release assets
@@ -25,7 +33,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.25'
           cache: true
 
       - name: Check Formatting
@@ -91,8 +99,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          no-cache: true
 
       # Cosign Keyless Signing uses OIDC authentication (actions/id-token permission)
       # to sign container images with the workflow run identity.
@@ -125,7 +132,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.25'
           cache: true
 
       - name: Run GoReleaser
@@ -137,3 +144,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+#      - name: Update Krew Plugin Manifest
+#        if: "!contains(github.ref, '-alpha') && !contains(github.ref, '-beta') && !contains(github.ref, '-rc')"
+#        uses: rajatjindal/krew-release-bot@v0.0.46
+#        env:
+#          KREW_TEMPLATE_FILE: .krew.yaml

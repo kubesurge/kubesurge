@@ -126,7 +126,11 @@ func ExecStream(ctx context.Context, config *rest.Config, clientset kubernetes.I
 	// which causes Stream to return a non-nil error. The caller (capture.go)
 	// treats this as a warning rather than a hard failure.
 	if err := executor.StreamWithContext(ctx, streamOpts); err != nil {
-		return fmt.Errorf("SPDY stream ended: %w", err)
+		// Return the raw error WITHOUT wrapping so callers can type-assert to
+		// k8s.io/client-go/util/exec.ExitError and inspect the exit code:
+		//   if exitErr, ok := err.(exec.ExitError); ok { exitErr.ExitStatus() }
+		// Wrapping with fmt.Errorf("%w") would break the type assertion.
+		return err
 	}
 
 	return nil

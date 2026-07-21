@@ -1,39 +1,25 @@
 # ══════════════════════════════════════════════════════════════════════════════
 #  kubesurge-debugpod — Diagnostic Payload Image
 # ══════════════════════════════════════════════════════════════════════════════
-#
-# Multi-stage build. Three stages:
-#   Stage 1 (dotnet-tools)  — installs dotnet-dump, dotnet-trace, dotnet-counters
-#   Stage 2 (tool-builder)  — installs all network/system tools via apt + verifies .so deps
-#   Stage 3 (final)         — debian:bookworm-slim + copies binaries from both stages
-#
-# Why debian:bookworm-slim and not scratch/distroless?
-#   tcpdump needs libpcap, strace needs libelf, .NET tools need libicu + libssl.
-#   Copying all transitive .so files manually is fragile.
-#   bookworm-slim ships glibc + libssl and is only ~30MB compressed.
-#
-# Build:     make docker-build
-# Kind load: make kind-load
-# ══════════════════════════════════════════════════════════════════════════════
 
 # ── Stage 1: .NET diagnostic tools ───────────────────────────────────────────
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS dotnet-tools
-
-# dotnet tool install produces self-contained single-file executables.
-# They bundle the .NET runtime they need — no separate runtime install in the final image.
-#
-#   dotnet-dump     : Managed heap dump capture + analysis (OOM debugging)
-#   dotnet-trace    : CPU / event tracing → .nettrace files (open in PerfView / VS)
-#   dotnet-counters : Real-time GC, threadpool, request-rate metrics
 RUN dotnet tool install --tool-path /diag-tools dotnet-dump     && \
     dotnet tool install --tool-path /diag-tools dotnet-trace    && \
     dotnet tool install --tool-path /diag-tools dotnet-counters
 
-# ── Stage 2: Network/System tool builder ─────────────────────────────────────
-# Full Debian image — has apt, has everything. Nothing from here goes into the
-# final image except the verified binary files themselves.
-FROM debian:bookworm AS tool-builder
+# ── Stage 2: Go eBPF Agent Builder ──────────────────────────────────────────
+FROM golang:1.25 AS agent-builder
+RUN apt-get update && apt-get install -y --no-install-recommends clang llvm libbpf-dev gcc-multilib
+WORKDIR /src
+COPY . .
+RUN go generate ./internal/ebpf/...
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /kubesurge-ebpf-agent ./cmd/ebpf-agent
 
+# ── Stage 3: Final image ─────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS final
+
+# Install diagnostic utilities cleanly using apt-get.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tcpdump         \
     nmap            \
@@ -49,101 +35,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     less            \
     vim-tiny        \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Verify shared library dependencies using `command -v` to find the correct path
-# regardless of whether the binary lives in /usr/bin, /usr/sbin, or /bin.
-# ldd exits non-zero if any .so is missing, which fails the build immediately.
-# .NET analogy: a post-publish smoke test that catches "DLL not found" before deployment.
-RUN echo "=== Verifying shared library dependencies ===" && \
-    ldd "$(command -v tcpdump)" && echo "✓ tcpdump"  && \
-    ldd "$(command -v strace)"  && echo "✓ strace"   && \
-    ldd "$(command -v curl)"    && echo "✓ curl"     && \
-    ldd "$(command -v ss)"      && echo "✓ ss"       && \
-    echo "=== All dependencies satisfied ==="
-
-# Print actual paths so we can see them in build logs (avoids the "wrong path" mistake)
-RUN echo "=== Binary locations on this Debian build ===" && \
-    command -v tcpdump && \
-    command -v strace  && \
-    command -v curl    && \
-    command -v ss      && \
-    command -v ip      && \
-    command -v nmap    && \
-    command -v nc      && \
-    command -v dig     && \
-    command -v ping    && \
-    command -v ps      && \
-    command -v lsof    && \
-    command -v jq      && \
-    command -v less    && \
-    command -v timeout
-
-# ── Stage 3: Final minimal image ─────────────────────────────────────────────
-FROM debian:bookworm-slim AS final
-
-# Install ONLY the shared libraries the binaries need at runtime.
-# No development headers, no documentation, no package manager state.
-RUN apt-get update && apt-get install -y --no-install-recommends \
     libpcap0.8      \
     libelf1         \
     libdw1          \
-    libcurl4        \
-    libssl3         \
-    libmnl0         \
-    libgssapi-krb5-2 \
-    libicu72        \
     libbpf1         \
-    zlib1g          \
-    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Copy binaries from tool-builder ──────────────────────────────────────────
-# All paths confirmed correct for Debian Bookworm (verified by the binary location
-# print step in the tool-builder stage above).
-
-# Network diagnostics
-COPY --from=tool-builder /usr/bin/tcpdump   /usr/bin/tcpdump
-COPY --from=tool-builder /usr/bin/nmap      /usr/bin/nmap
-COPY --from=tool-builder /usr/bin/nc        /usr/bin/nc
-COPY --from=tool-builder /usr/bin/dig       /usr/bin/dig
-COPY --from=tool-builder /usr/bin/ping      /usr/bin/ping
-COPY --from=tool-builder /usr/bin/curl      /usr/bin/curl
-COPY --from=tool-builder /usr/sbin/ip       /usr/bin/ip
-COPY --from=tool-builder /usr/bin/ss       /usr/bin/ss
-
-
-# Process / system diagnostics
-COPY --from=tool-builder /usr/bin/strace    /usr/bin/strace
-COPY --from=tool-builder /usr/bin/ps        /usr/bin/ps
-COPY --from=tool-builder /usr/bin/top       /usr/bin/top
-COPY --from=tool-builder /usr/bin/lsof      /usr/bin/lsof
-
-# Utility
-COPY --from=tool-builder /usr/bin/jq        /usr/bin/jq
-COPY --from=tool-builder /usr/bin/less      /usr/bin/less
-COPY --from=tool-builder /usr/bin/vim.tiny  /usr/bin/vi
-COPY --from=tool-builder /usr/bin/timeout   /usr/bin/timeout
-
-# Shell — required for both diagnose mode (interactive bash session)
-# and capture mode (the exec command uses /bin/sh -c)
-COPY --from=tool-builder /bin/bash          /bin/bash
-COPY --from=tool-builder /bin/sh            /bin/sh
-
-# CA bundle for curl HTTPS and .NET TLS
-COPY --from=tool-builder /etc/ssl/certs/ca-certificates.crt \
-                          /etc/ssl/certs/ca-certificates.crt
-
-# ── Copy .NET diagnostic tools ────────────────────────────────────────────────
-# Self-contained executables — no separate .NET runtime needed.
+# Copy .NET diagnostic tools
 COPY --from=dotnet-tools /diag-tools/ /usr/local/bin/
 
-# ── Metadata ──────────────────────────────────────────────────────────────────
+# Copy Go eBPF agent
+COPY --from=agent-builder /kubesurge-ebpf-agent /usr/local/bin/kubesurge-ebpf-agent
+
 LABEL org.opencontainers.image.title="kubesurge-debugpod"
 LABEL org.opencontainers.image.description="kubesurge diagnostic payload: tcpdump, strace, dotnet-dump, dotnet-trace, dotnet-counters"
 LABEL org.opencontainers.image.source="https://github.com/kubesurge/kubesurge"
 
-# ── Entrypoint ────────────────────────────────────────────────────────────────
-# diagnose mode: kubectl attach -it drops into this bash session
-# capture mode:  kubesurge overrides with Command=["sleep","3600"] in InjectOptions
-ENTRYPOINT ["/bin/bash"]
+CMD ["/bin/bash"]

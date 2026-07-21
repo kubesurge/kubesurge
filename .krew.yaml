@@ -3,7 +3,7 @@ kind: Plugin
 metadata:
   name: kubesurge
 spec:
-  version: "v0.1.0"
+  version: "{{ .TagName }}"
   homepage: https://github.com/kubesurge/kubesurge
   shortDescription: Pod diagnostic injector and network streamer.
   description: |
@@ -18,8 +18,7 @@ spec:
       matchLabels:
         os: darwin
         arch: amd64
-    uri: https://github.com/kubesurge/kubesurge/releases/download/v0.1.0/kubesurge_darwin_x86_64.tar.gz
-    sha256: "43f68da5c08fb7cf120c59eb84185a7efd9ba2dc2fa0b993183afb22c643f712"
+    {{addURIAndSha "https://github.com/kubesurge/kubesurge/releases/download/{{ .TagName }}/kubesurge_darwin_x86_64.tar.gz" .TagName }}
     files:
     - from: "./kubesurge"
       to: "."
@@ -31,8 +30,7 @@ spec:
       matchLabels:
         os: darwin
         arch: arm64
-    uri: https://github.com/kubesurge/kubesurge/releases/download/v0.1.0/kubesurge_darwin_arm64.tar.gz
-    sha256: "459c61b40d00db32b11d647a26c78679b45326c417470c87e16164c3d046971d"
+    {{addURIAndSha "https://github.com/kubesurge/kubesurge/releases/download/{{ .TagName }}/kubesurge_darwin_arm64.tar.gz" .TagName }}
     files:
     - from: "./kubesurge"
       to: "."
@@ -44,8 +42,7 @@ spec:
       matchLabels:
         os: linux
         arch: amd64
-    uri: https://github.com/kubesurge/kubesurge/releases/download/v0.1.0/kubesurge_linux_x86_64.tar.gz
-    sha256: "680782e38ca8e3195b77c7eda0261d87d833792310bea259d9177cd7ad0a166e"
+    {{addURIAndSha "https://github.com/kubesurge/kubesurge/releases/download/{{ .TagName }}/kubesurge_linux_x86_64.tar.gz" .TagName }}
     files:
     - from: "./kubesurge"
       to: "."
@@ -57,8 +54,7 @@ spec:
       matchLabels:
         os: linux
         arch: arm64
-    uri: https://github.com/kubesurge/kubesurge/releases/download/v0.1.0/kubesurge_linux_arm64.tar.gz
-    sha256: "f2527214fa6d9f4b58584f5b36ba8333073b61857104b8bb7a1f3eaa2d7c3f51"
+    {{addURIAndSha "https://github.com/kubesurge/kubesurge/releases/download/{{ .TagName }}/kubesurge_linux_arm64.tar.gz" .TagName }}
     files:
     - from: "./kubesurge"
       to: "."

@@ -30,7 +30,7 @@ import (
 type InjectOptions struct {
 	// Name is the unique name for this ephemeral container.
 	// Must be unique within the pod — ephemeral containers are append-only,
-	// so a second injection with the same name will fail.
+	// so a second injection with the same name will fail at the API server.
 	Name string
 
 	// Image is the container image to use as the debug payload.
@@ -50,7 +50,7 @@ type InjectOptions struct {
 	// Command overrides the container entrypoint. If nil, the image's default
 	// entrypoint is used (e.g. /bin/bash for interactive mode).
 	//
-	// For capture mode we set this to ["sleep", "3600"] so the container stays
+	// For capture mode we set this to ["sleep", N] so the container stays
 	// alive while we exec tcpdump into it. Without this override the container
 	// exits immediately (no PID 1 = container terminates).
 	//
@@ -67,6 +67,11 @@ type InjectOptions struct {
 	// or hostIPC. Because host namespace sharing allows container breakout,
 	// kubesurge blocks injection into these pods by default to prevent privilege escalation.
 	AllowHostNamespace bool
+
+	// DryRun skips the API PATCH call. All security preflight checks still run.
+	// The caller receives the marshalled patch JSON via DryRunOutput.
+	// Use this for the --dry-run CLI flag and for unit tests that verify patch structure.
+	DryRun bool
 }
 
 // ephemeralContainerPatch is the JSON structure we send to the subresource endpoint.
@@ -85,16 +90,24 @@ type ephemeralSpecPatch struct {
 //
 // It uses a JSON Merge Patch (not Strategic Merge Patch) because the ephemeralcontainers
 // subresource only supports merge patching.
+//
+// When opts.DryRun is true, all security checks are performed but the PATCH API call
+// is skipped. The patch JSON is returned as a formatted string in the second return value.
 func InjectEphemeralContainer(
 	clientset kubernetes.Interface,
 	namespace string,
 	podName string,
 	opts InjectOptions,
-) error {
-	// Fetch the pod first to verify security posture (preflight verification)
-	pod, err := GetPod(clientset, namespace, podName)
+) (patchJSON string, err error) {
+	// Fetch the pod first to verify security posture (preflight verification).
+	// This runs even in dry-run mode so that operators get an accurate security verdict.
+	pod, err := clientset.CoreV1().Pods(namespace).Get(
+		context.Background(),
+		podName,
+		metav1.GetOptions{},
+	)
 	if err != nil {
-		return fmt.Errorf("failed to fetch target pod metadata: %w", err)
+		return "", fmt.Errorf("failed to fetch target pod metadata: %w", err)
 	}
 
 	// 🛡️ Security Check: Prevent Host Namespace Breakouts
@@ -102,10 +115,25 @@ func InjectEphemeralContainer(
 	// injecting an ephemeral container into it lets the container escape namespaces.
 	// We block this by default unless the operator explicitly sets AllowHostNamespace.
 	if (pod.Spec.HostPID || pod.Spec.HostNetwork || pod.Spec.HostIPC) && !opts.AllowHostNamespace {
-		return fmt.Errorf("security violation: target pod %s/%s runs with host privileges (HostPID: %t, HostNetwork: %t, HostIPC: %t)\n"+
-			"  → Injecting an ephemeral container into this pod could lead to host node escape.\n"+
-			"  → To proceed, you must explicitly enable --allow-host-namespaces",
+		return "", fmt.Errorf(
+			"security violation: target pod %s/%s runs with host privileges (HostPID: %t, HostNetwork: %t, HostIPC: %t)\n"+
+				"  → Injecting an ephemeral container into this pod could lead to host node escape.\n"+
+				"  → To proceed, you must explicitly enable --allow-host-namespaces",
 			namespace, podName, pod.Spec.HostPID, pod.Spec.HostNetwork, pod.Spec.HostIPC)
+	}
+
+	// 🛡️ Security Check: Duplicate container name detection.
+	// Ephemeral containers are append-only — the API server will return a 422 if you
+	// try to add one with a name that already exists. Detect this client-side so we
+	// can give a clear error rather than an opaque 422 from the API server.
+	for _, ec := range pod.Status.EphemeralContainerStatuses {
+		if ec.Name == opts.Name {
+			return "", fmt.Errorf(
+				"ephemeral container %q already exists in pod %s/%s\n"+
+					"  → Ephemeral containers are append-only and cannot be replaced.\n"+
+					"  → Use a unique container name for each injection.",
+				opts.Name, namespace, podName)
+		}
 	}
 
 	// Build the strongly-typed EphemeralContainer spec.
@@ -117,9 +145,7 @@ func InjectEphemeralContainer(
 	// startupProbe, lifecycle, resources (in some versions). The API server will
 	// reject the patch if you include them.
 	ec := corev1.EphemeralContainer{
-		// EphemeralContainerCommon embeds all fields shared with regular containers.
 		EphemeralContainerCommon: corev1.EphemeralContainerCommon{
-
 			Name:            opts.Name,
 			Image:           opts.Image,
 			ImagePullPolicy: corev1.PullIfNotPresent,
@@ -127,18 +153,17 @@ func InjectEphemeralContainer(
 			TTY:             opts.Interactive,
 
 			// Command: keeps the container alive for capture mode.
-			// ["sleep", "3600"] prevents the container from exiting immediately
+			// ["sleep", "N"] prevents the container from exiting immediately
 			// (which happens when an image's entrypoint is a shell that gets no stdin).
-			// For diagnose mode (Interactive=true) this is nil — netshoot auto-starts bash.
+			// For diagnose mode (Interactive=true) this is nil — the image auto-starts bash.
 			Command: opts.Command,
 
 			// SecurityContext: kubesurge uses capabilities-only mode by default so it
 			// works on Kyverno-hardened clusters. Privileged mode is opt-in.
 			//
-			// Discovered empirically against TurnkeyIDP (Kyverno v1.11):
-			//   - privileged: true  → PolicyViolation warning logged, container STILL starts
-			//     (Kyverno's disallow-privileged-containers is in Audit mode, not Enforce)
-			//   - capabilities only → No violation at all, cleaner posture
+			// Verified against idp-dev-cluster (Kyverno v1.11, Audit mode):
+			//   - privileged: true  → PolicyViolation warning logged, container still starts
+			//   - capabilities only → No violation, cleaner posture
 			SecurityContext: buildSecurityContext(opts),
 
 			// FallbackToLogsOnError: if the container fails, K8s shows the last few
@@ -152,15 +177,41 @@ func InjectEphemeralContainer(
 		TargetContainerName: opts.TargetContainer,
 	}
 
+	// Build the patch array: existing ephemeral containers + new one.
+	//
+	// JSON Merge Patch (RFC 7396) replaces arrays wholesale — it does NOT append.
+	// If we send only the new container, the API server interprets the missing
+	// existing containers as a removal request and rejects it with:
+	//   "existing ephemeral containers X may not be removed"
+	//
+	// Solution: read the current list from the pod spec and include all of them
+	// in the patch, appending the new one at the end.
+	allContainers := make([]corev1.EphemeralContainer, 0, len(pod.Spec.EphemeralContainers)+1)
+	allContainers = append(allContainers, pod.Spec.EphemeralContainers...)
+	allContainers = append(allContainers, ec)
+
 	// Serialise the patch to JSON.
 	// .NET analogy: JsonSerializer.Serialize(patchDocument, options)
-	patchBody, err := json.Marshal(ephemeralContainerPatch{
+	rawPatch, err := json.Marshal(ephemeralContainerPatch{
 		Spec: ephemeralSpecPatch{
-			EphemeralContainers: []corev1.EphemeralContainer{ec},
+			EphemeralContainers: allContainers,
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to serialise ephemeral container patch: %w", err)
+		return "", fmt.Errorf("failed to serialise ephemeral container patch: %w", err)
+	}
+
+	// Pretty-print for dry-run output and error messages.
+	prettyPatch, _ := json.MarshalIndent(ephemeralContainerPatch{
+		Spec: ephemeralSpecPatch{
+			EphemeralContainers: allContainers,
+		},
+	}, "", "  ")
+
+	// DryRun: return the patch JSON to the caller without hitting the API.
+	// All security checks above have already run.
+	if opts.DryRun {
+		return string(prettyPatch), nil
 	}
 
 	// PATCH /api/v1/namespaces/{namespace}/pods/{name}/ephemeralcontainers
@@ -171,24 +222,18 @@ func InjectEphemeralContainer(
 	//   - types.MergePatchType sends a JSON Merge Patch (RFC 7396)
 	//
 	// .NET analogy: PATCH /pods/{name}/ephemeralcontainers with Content-Type: application/merge-patch+json
-	restClient := clientset.CoreV1().RESTClient()
-	if restClient == nil || fmt.Sprintf("%T", clientset) == "*fake.Clientset" {
-		// Mock client detected; skip HTTP request in tests
-		return nil
-	}
-
-	err = restClient.
+	err = clientset.CoreV1().RESTClient().
 		Patch(types.MergePatchType).
 		Namespace(namespace).
 		Resource("pods").
 		Name(podName).
 		SubResource("ephemeralcontainers").
-		Body(patchBody).
+		Body(rawPatch).
 		Do(context.Background()).
 		Error()
 
 	if err != nil {
-		return fmt.Errorf("patch to /ephemeralcontainers subresource failed: %w\n"+
+		return "", fmt.Errorf("patch to /ephemeralcontainers subresource failed: %w\n"+
 			"  → Common causes:\n"+
 			"    - Kyverno/OPA policy in ENFORCE mode blocking capabilities or privileged mode\n"+
 			"    - Pod Security Admission (PSA) set to 'restricted' on this namespace\n"+
@@ -196,7 +241,7 @@ func InjectEphemeralContainer(
 			"    - Image '%s' not pullable (check imagePullPolicy and registry access)", err, opts.Image)
 	}
 
-	return nil
+	return "", nil
 }
 
 // boolPtr returns a pointer to a bool value.
@@ -219,7 +264,7 @@ func int64Ptr(i int64) *int64 {
 // Two modes:
 //
 //  1. Default (CapabilitiesOnly): Adds only NET_RAW and SYS_PTRACE.
-//     Tested against TurnkeyIDP with Kyverno disallow-privileged-containers in Audit mode.
+//     Works on Kyverno/PSA hardened clusters (Audit mode).
 //     Kyverno logs no violation for capability additions unless disallow-capabilities
 //     is also in Enforce mode.
 //
@@ -238,12 +283,16 @@ func buildSecurityContext(opts InjectOptions) *corev1.SecurityContext {
 	// Capabilities-only: safer, works on Kyverno/PSA hardened clusters.
 	// We explicitly drop ALL capabilities first, then add back only what we need.
 	// This signals to the security policy engine that we are being intentionally minimal.
-	// AllowPrivilegeEscalation: false ensures child processes cannot gain more privileges.
+	//
+	// Note: AllowPrivilegeEscalation is intentionally NOT set to false here.
+	// Setting it would enable no_new_privs=1 in the kernel, which unconditionally
+	// blocks setuid() — breaking tcpdump's privilege-drop from root to the tcpdump
+	// system user (which requires CAP_SETUID). The DROP ALL + selective ADD already
+	// expresses a minimal, auditable capability posture without no_new_privs.
 	return &corev1.SecurityContext{
-		RunAsUser:                int64Ptr(0), // Force root execution so capabilities apply correctly
-		RunAsGroup:               int64Ptr(0),
-		RunAsNonRoot:             boolPtr(false),
-		AllowPrivilegeEscalation: boolPtr(false),
+		RunAsUser:    int64Ptr(0), // Force root execution so capabilities apply correctly
+		RunAsGroup:   int64Ptr(0),
+		RunAsNonRoot: boolPtr(false),
 		Capabilities: &corev1.Capabilities{
 			Drop: []corev1.Capability{
 				"ALL",
@@ -251,6 +300,8 @@ func buildSecurityContext(opts InjectOptions) *corev1.SecurityContext {
 			Add: []corev1.Capability{
 				"NET_RAW",    // tcpdump: open raw packet sockets
 				"SYS_PTRACE", // strace: attach to other processes
+				"SETUID",     // tcpdump: drop from root to tcpdump system user after socket bind
+				"SETGID",     // tcpdump: drop group alongside SETUID
 			},
 		},
 	}

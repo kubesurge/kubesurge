@@ -72,12 +72,23 @@ Capture traffic on a pod and stream it directly to a local file or cloud bucket:
 # Capture to local disk (uses the signed ghcr.io/kubesurge/debugpod image)
 kubesurge capture network -n default -p <target-pod> --duration 15s --sink ./capture.pcap --privileged
 
+# Stream packet captures directly into Wireshark locally for real-time visualization
+kubesurge capture network -n default -p <target-pod> --duration 30s --sink - --privileged | wireshark -k -i -
+
 # Exfiltrate capture directly to an AWS S3 bucket
 kubesurge capture network -n default -p <target-pod> --duration 30s --sink s3://my-bucket/ --privileged
 
 # Exfiltrate capture directly to an Azure Blob container
 kubesurge capture network -n default -p <target-pod> --duration 30s --sink azblob://my-container/ --privileged
 ```
+
+### Cloud Storage Authentication
+
+KubeSurge streams packet captures directly to cloud storage buckets using standard SDK credential resolution:
+
+* **AWS S3 (`s3://my-bucket/`)**: Uses standard AWS SDK Go v2 authentication (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, or `~/.aws/credentials` / `AWS_PROFILE`).
+* **Google Cloud Storage (`gs://my-bucket/`)**: Uses Google Application Default Credentials (`GOOGLE_APPLICATION_CREDENTIALS` JSON key file or `gcloud auth application-default login`).
+* **Azure Blob Storage (`azblob://my-container/`)**: Uses Azure SDK authentication (`AZURE_STORAGE_ACCOUNT` + `AZURE_STORAGE_KEY` or `AZURE_STORAGE_SAS_TOKEN`).
 
 ---
 
@@ -195,3 +206,14 @@ rules:
   resources: ["pods/exec"]
   verbs: ["create"]
 ```
+
+---
+
+## AI-Generated Code & Auditor Disclaimer
+
+> [!IMPORTANT]
+> **AI-Generated Code Disclaimer**
+> 
+> Parts of the KubeSurge codebase (specifically the TUI dashboard, OTLP exporters, and eBPF socket tracing agent) were generated/assisted by AI coding agents. 
+> 
+> Because this tool executes at high privilege levels (such as requiring `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, and `pods/ephemeralcontainers` patching access) inside Kubernetes clusters, security auditors, administrators, and users are strongly advised to perform independent security reviews of the BPF and loader components before deploying KubeSurge in production environments.

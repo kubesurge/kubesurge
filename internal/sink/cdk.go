@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -57,8 +58,33 @@ func NewCDKSink(ctx context.Context, sinkURL string, blobName string) (*CDKSink,
 			return nil, fmt.Errorf("failed to resolve local path: %w", err)
 		}
 
-		dir := filepath.Dir(absPath)
-		finalBlobName = filepath.Base(absPath)
+		// Detect whether the sink is a directory target or a specific file target.
+		//
+		// Directory target: path ends with "/" OR resolved path is an existing directory.
+		//   Example: "/tmp/captures/" → bucket=file:///tmp/captures, blob=<blobName>
+		//   This is the right mode for multi-target fan-out (each pod gets its own file).
+		//
+		// File target: path points to a specific file name.
+		//   Example: "/tmp/capture.pcap" → bucket=file:///tmp, blob=capture.pcap
+		//   The caller-supplied blobName is ignored; the path filename is used instead.
+		isDir := strings.HasSuffix(path, "/") || strings.HasSuffix(path, string(filepath.Separator))
+		if !isDir {
+			// Check if the path already exists as a directory on disk
+			if info, statErr := os.Stat(absPath); statErr == nil && info.IsDir() {
+				isDir = true
+			}
+		}
+
+		var dir string
+		if isDir {
+			// Use absPath itself as the bucket root; use caller's blobName as the blob.
+			dir = absPath
+			finalBlobName = filepath.Base(blobName)
+		} else {
+			// Split into parent dir + filename; ignore caller's blobName.
+			dir = filepath.Dir(absPath)
+			finalBlobName = filepath.Base(absPath)
+		}
 
 		// Convert backslashes for Windows path strings
 		dir = strings.ReplaceAll(dir, "\\", "/")

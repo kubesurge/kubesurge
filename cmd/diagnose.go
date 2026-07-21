@@ -102,7 +102,7 @@ func runDiagnose() error {
 	// k8s.InjectEphemeralContainer sends a PATCH to the /ephemeralcontainers
 	// subresource. This is the key API call — it modifies the pod's runtime
 	// spec without restarting any existing containers.
-	err := k8s.InjectEphemeralContainer(clientset, namespace, podName, k8s.InjectOptions{
+	_, err := k8s.InjectEphemeralContainer(clientset, namespace, podName, k8s.InjectOptions{
 		Name:               containerName,
 		Image:              debugImage,
 		Interactive:        true, // stdin:true, tty:true — needed for a shell

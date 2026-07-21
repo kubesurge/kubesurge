@@ -147,6 +147,7 @@ func init() {
 	rootCmd.AddCommand(newRbacCheckCmd())
 	rootCmd.AddCommand(newDiagnoseCmd())
 	rootCmd.AddCommand(newCaptureCmd())
+	rootCmd.AddCommand(newSniffCmd())
 }
 
 // ---------------------------------------------------------------------------
@@ -168,8 +169,11 @@ func initK8sClients() error {
 	return nil
 }
 
-// defaultKubeConfigPath returns ~/.kube/config, the same default kubectl uses.
+// defaultKubeConfigPath returns the path to the kubeconfig file, respecting the KUBECONFIG environment variable if set, and falling back to ~/.kube/config otherwise.
 func defaultKubeConfigPath() string {
+	if envPath := os.Getenv("KUBECONFIG"); envPath != "" {
+		return envPath
+	}
 	if home := homedir.HomeDir(); home != "" {
 		return filepath.Join(home, ".kube", "config")
 	}

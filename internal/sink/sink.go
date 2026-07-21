@@ -37,6 +37,9 @@ type BoundedBufferWriter struct {
 
 	// writeErr stores any asynchronous write error
 	writeErr error
+
+	// MaxCaptureSizeBytes is the maximum allowed capture output size (0 = unlimited).
+	MaxCaptureSizeBytes int64
 }
 
 // NewBoundedBufferWriter wraps an io.Writer with a bounded memory buffer.
@@ -66,6 +69,11 @@ func (w *BoundedBufferWriter) Write(p []byte) (int, error) {
 
 	if w.writeErr != nil {
 		return 0, w.writeErr
+	}
+
+	// Check if max capture size limit is exceeded
+	if w.MaxCaptureSizeBytes > 0 && w.totalBytes >= w.MaxCaptureSizeBytes {
+		return 0, io.EOF
 	}
 
 	chunkSize := int64(len(p))
